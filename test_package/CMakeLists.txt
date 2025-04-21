@@ -1,11 +1,11 @@
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.12)
 project(TinyAesPackageTest C CXX)
 
-include(${CMAKE_BINARY_DIR}/conanbuildinfo.cmake)
-conan_basic_setup()
+add_executable(example ${CMAKE_SOURCE_DIR}/test.c)
+add_executable(example_cpp ${CMAKE_SOURCE_DIR}/test.cpp)
 
-add_executable(example ../test.c)
-add_executable(example_cpp ../test.cpp)
+target_link_libraries(example PRIVATE tiny-aes)
+target_link_libraries(example_cpp PRIVATE tiny-aes)
 
-target_link_libraries(example ${CONAN_LIBS})
-target_link_libraries(example_cpp ${CONAN_LIBS})
+add_test(NAME C_Test COMMAND example)
+add_test(NAME Cpp_Test COMMAND example_cpp)

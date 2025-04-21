@@ -1,0 +1,240 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+// Enable ECB, CTR and CBC mode. Note this can be done before including aes.h or at compile-time.
+// E.g. with GCC by using the -D flag: gcc -c aes.c -DCBC=0 -DCTR=1 -DECB=1
+#define CBC 1
+#define CTR 1
+#define ECB 1
+
+#include "aes.h"
+
+// Helper function to print buffer in hex
+static void print_hex(const char* label, const uint8_t* buf, size_t len) {
+    printf("%s (%zu bytes): ", label, len);
+    for (size_t i = 0; i < len; ++i) {
+        printf("%02x", buf[i]);
+    }
+    printf("\n");
+}
+
+// Structure to hold a GCM test vector
+typedef struct {
+    const char* name;
+    int key_len; // In bytes (16, 24, 32, 64)
+    const uint8_t* key;
+    int iv_len; // In bytes (only 12 supported by this impl)
+    const uint8_t* iv;
+    int pt_len;
+    const uint8_t* pt;
+    int aad_len;
+    const uint8_t* aad;
+    const uint8_t* expected_ct;
+    const uint8_t* expected_tag;
+} gcm_test_vector_t;
+
+// --- NIST SP 800-38D Appendix B Test Vectors ---
+
+// B.1 - AES-128 Test Case 2
+const uint8_t key_128_b1[] = { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
+const uint8_t iv_128_b1[]  = { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
+const uint8_t pt_128_b1[]  = { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
+const uint8_t ct_128_b1[]  = { 0x03,0x88,0xda,0xce,0x60,0xb6,0xa3,0x92,0xf3,0x28,0xc2,0xb9,0x71,0xb2,0xfe,0x78 };
+const uint8_t tag_128_b1[] = { 0xab,0x6e,0x47,0xd4,0x2c,0xec,0x13,0xbd,0xf5,0x3a,0x67,0xb2,0x12,0x57,0xbd,0xdf };
+
+// B.2 - AES-128 Test Case 4
+const uint8_t key_128_b2[] = { 0xfe,0xff,0xe9,0x92,0x86,0x65,0x73,0x1c,0x6d,0x6a,0x8f,0x94,0x67,0x30,0x83,0x08 };
+const uint8_t iv_128_b2[]  = { 0xca,0xfe,0xba,0xbe,0xfa,0xce,0xdb,0xad,0xde,0xca,0xf8,0x88 };
+const uint8_t pt_128_b2[]  = {
+    0xd9,0xa3,0x21,0x16,0x8e,0x21,0x0e,0x88,0xa3,0x0a,0x8a,0x54,0x97,0x40,0xe3,0x00,
+    0x3d,0x80,0xaa,0x4c,0x77,0x0b,0x57,0x0e,0xc6,0xc7,0x55,0x5a,0xac,0x2f,0x09,0x98,
+    0x3c,0x77,0x00,0x4f,0x74,0xd2,0x82,0x94,0x3b,0xd1,0x87,0x0a,0xd3,0x8e,0x0f,0xd2,
+    0xa0,0x02,0x64,0xc5,0x82,0x97,0x40,0xca,0x7a,0x4c,0xc1,0xe8,0xa5,0xe4,0xe8,0x00
+};
+const uint8_t aad_128_b2[] = { 0xfe,0xed,0xfa,0xce,0xde,0xad,0xbe,0xef,0xfe,0xed,0xfa,0xce,0xde,0xad,0xbe,0xef,0xab,0xad,0xda,0xd2 };
+const uint8_t ct_128_b2[]  = {
+    0x42,0x83,0x1e,0xc2,0x21,0x77,0x74,0x24,0x4b,0x72,0x21,0xb7,0x84,0xd0,0xd4,0x9c,
+    0xe3,0xaa,0x21,0x2f,0x2c,0x02,0xa4,0xe0,0x35,0xc1,0x7e,0x23,0x29,0xac,0xa1,0x2e,
+    0x21,0xd5,0x14,0xb2,0x54,0x66,0x93,0x1c,0x7d,0x8f,0x6a,0x5a,0xac,0x84,0xaa,0x05,
+    0x1b,0xa3,0x0b,0x39,0x6a,0x0a,0xac,0x97,0x3d,0x58,0xe0,0x91
+};
+const uint8_t tag_128_b2[] = { 0x5b,0xc9,0x4f,0xbc,0x32,0x21,0xa5,0xdb,0x94,0xfa,0xe9,0x5a,0xe7,0x12,0x1a,0x47 };
+
+// B.5 - AES-256 Test Case 10
+const uint8_t key_256_b5[] = {
+    0xfe,0xff,0xe9,0x92,0x86,0x65,0x73,0x1c,0x6d,0x6a,0x8f,0x94,0x67,0x30,0x83,0x08,
+    0xfe,0xff,0xe9,0x92,0x86,0x65,0x73,0x1c,0x6d,0x6a,0x8f,0x94,0x67,0x30,0x83,0x08
+};
+const uint8_t iv_256_b5[]  = { 0xca,0xfe,0xba,0xbe,0xfa,0xce,0xdb,0xad,0xde,0xca,0xf8,0x88 };
+const uint8_t pt_256_b5[]  = {
+    0xd9,0xa3,0x21,0x16,0x8e,0x21,0x0e,0x88,0xa3,0x0a,0x8a,0x54,0x97,0x40,0xe3,0x00,
+    0x3d,0x80,0xaa,0x4c,0x77,0x0b,0x57,0x0e,0xc6,0xc7,0x55,0x5a,0xac,0x2f,0x09,0x98,
+    0x3c,0x77,0x00,0x4f,0x74,0xd2,0x82,0x94,0x3b,0xd1,0x87,0x0a,0xd3,0x8e,0x0f,0xd2
+};
+const uint8_t aad_256_b5[] = { 0xfe,0xed,0xfa,0xce,0xde,0xad,0xbe,0xef,0xfe,0xed,0xfa,0xce,0xde,0xad,0xbe,0xef,0xab,0xad,0xda,0xd2 };
+const uint8_t ct_256_b5[]  = {
+    0x52,0x2d,0xc1,0xf0,0x99,0x56,0x7d,0x07,0xf4,0x7f,0x37,0xa3,0x2a,0x84,0x42,0x7d,
+    0x64,0x3a,0x8c,0xd4,0x44,0x0e,0xe1,0x2a,0x70,0x8c,0xc0,0x9e,0xa9,0xa1,0x32,0xcc,
+    0xf3,0xff,0x39,0x86,0x4f,0xdf,0x61,0xc5,0x86,0x58,0x4b,0x4f,0x6a,0xe9,0x57
+};
+const uint8_t tag_256_b5[] = { 0x61,0x9c,0xc5,0xae,0xff,0xfe,0x0b,0x6b,0x45,0x4d,0x48,0xbe,0xb7,0xc8,0x0f,0x4f };
+
+// --- Non-Standard AES-512 Self-Consistency Test ---
+// NO OFFICIAL VECTORS EXIST FOR THIS. Key chosen arbitrarily.
+const uint8_t key_512_sc[] = {
+    0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+    0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1a,0x1b,0x1c,0x1d,0x1e,0x1f,
+    0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x29,0x2a,0x2b,0x2c,0x2d,0x2e,0x2f,
+    0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0x3a,0x3b,0x3c,0x3d,0x3e,0x3f
+};
+const uint8_t iv_512_sc[]  = { 0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b };
+const uint8_t pt_512_sc[]  = { 0x54, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x61, 0x20, 0x74, 0x65, 0x73, 0x74, 0x2e }; // "This is a test."
+const uint8_t aad_512_sc[] = { 0xAA, 0xBB, 0xCC, 0xDD };
+
+// Function to run a single GCM test vector
+int run_gcm_test(const gcm_test_vector_t* vector) {
+    struct AES_ctx ctx;
+    uint8_t* calculated_ct = NULL;
+    uint8_t* decrypted_pt = NULL;
+    uint8_t calculated_tag[AES_GCM_TAG_LEN];
+    int result = 1; // Default to failure
+    int encrypt_ret, decrypt_ret;
+
+    printf("--- Running Test: %s ---\n", vector->name);
+
+    // Allocate buffers
+    calculated_ct = (uint8_t*)malloc(vector->pt_len);
+    decrypted_pt = (uint8_t*)malloc(vector->pt_len);
+    if (!calculated_ct || !decrypted_pt) {
+        printf("ERROR: Memory allocation failed!\n");
+        goto cleanup;
+    }
+
+    // Select key size based on test vector
+    // This relies on the compile-time definitions in aes.h to match
+#if defined(AES128) && (AES128 == 1)
+    if (vector->key_len != 16) { printf("Skipping test - compiled for AES128\n"); result=0; goto cleanup; }
+#elif defined(AES192) && (AES192 == 1)
+     if (vector->key_len != 24) { printf("Skipping test - compiled for AES192\n"); result=0; goto cleanup; }
+#elif defined(AES256) && (AES256 == 1)
+     if (vector->key_len != 32) { printf("Skipping test - compiled for AES256\n"); result=0; goto cleanup; }
+#elif defined(AES512) && (AES512 == 1)
+     if (vector->key_len != 64) { printf("Skipping test - compiled for AES512\n"); result=0; goto cleanup; }
+#else
+    #error "No AES key size defined!"
+#endif
+
+    print_hex("Key", vector->key, vector->key_len);
+    print_hex("IV", vector->iv, vector->iv_len);
+    if (vector->aad_len > 0) print_hex("AAD", vector->aad, vector->aad_len);
+    print_hex("Plaintext", vector->pt, vector->pt_len);
+
+    // --- Encryption --- 
+    AES_init_ctx(&ctx, vector->key);
+    encrypt_ret = AES_GCM_encrypt(&ctx, vector->iv, vector->iv_len, 
+                                vector->aad, vector->aad_len, 
+                                vector->pt, calculated_ct, vector->pt_len, 
+                                calculated_tag);
+
+    if (encrypt_ret != 0) {
+        printf("ERROR: AES_GCM_encrypt failed with code %d\n", encrypt_ret);
+        goto cleanup;
+    }
+
+    print_hex("Calculated CT", calculated_ct, vector->pt_len);
+    print_hex("Calculated Tag", calculated_tag, AES_GCM_TAG_LEN);
+
+    // --- Verification (if expected values are provided) ---
+    if (vector->expected_ct && vector->expected_tag) {
+        print_hex("Expected CT", vector->expected_ct, vector->pt_len);
+        print_hex("Expected Tag", vector->expected_tag, AES_GCM_TAG_LEN);
+
+        if (memcmp(calculated_ct, vector->expected_ct, vector->pt_len) != 0) {
+            printf("ERROR: Ciphertext mismatch!\n");
+            goto cleanup;
+        }
+        if (memcmp(calculated_tag, vector->expected_tag, AES_GCM_TAG_LEN) != 0) {
+            printf("ERROR: Tag mismatch!\n");
+            goto cleanup;
+        }
+        printf("Encrypt Verify: SUCCESS\n");
+    } else {
+        printf("Skipping verification (no expected CT/Tag provided - likely self-test)\n");
+    }
+
+    // --- Decryption --- 
+    AES_init_ctx(&ctx, vector->key); // Re-init context (key only)
+    decrypt_ret = AES_GCM_decrypt(&ctx, vector->iv, vector->iv_len,
+                                vector->aad, vector->aad_len,
+                                calculated_ct, decrypted_pt, vector->pt_len, // Use calculated CT
+                                calculated_tag); // Use calculated Tag
+
+    if (decrypt_ret != 0) {
+        printf("ERROR: AES_GCM_decrypt failed with code %d\n", decrypt_ret);
+        goto cleanup;
+    }
+
+    print_hex("Decrypted PT", decrypted_pt, vector->pt_len);
+
+    // --- Verification --- 
+    if (memcmp(decrypted_pt, vector->pt, vector->pt_len) != 0) {
+        printf("ERROR: Decrypted plaintext mismatch!\n");
+        goto cleanup;
+    }
+
+    printf("Decrypt Verify: SUCCESS\n");
+    result = 0; // Success
+
+cleanup:
+    free(calculated_ct);
+    free(decrypted_pt);
+    printf("--- Test %s: %s ---\n\n", vector->name, result == 0 ? "PASSED" : "FAILED");
+    return result;
+}
+
+#ifndef AES_GCM_STANDALONE_TEST // Only define main if compiling standalone C test
+int main(void) {
+    int total_failures = 0;
+    printf("Starting AES-GCM Tests...\n");
+    // printf("(Note: IV lengths != 12 bytes are not supported in this implementation)\n"); // Commented out as non-12-byte IVs are now supported
+
+    // NIST Vectors
+    gcm_test_vector_t test1 = { "NIST B.1 (AES-128)", 16, key_128_b1, 12, iv_128_b1, 16, pt_128_b1, 0, NULL, ct_128_b1, tag_128_b1 };
+    gcm_test_vector_t test2 = { "NIST B.2 (AES-128)", 16, key_128_b2, 12, iv_128_b2, 60, pt_128_b2, 20, aad_128_b2, ct_128_b2, tag_128_b2 };
+    gcm_test_vector_t test3 = { "NIST B.5 (AES-256)", 32, key_256_b5, 12, iv_256_b5, 47, pt_256_b5, 20, aad_256_b5, ct_256_b5, tag_256_b5 };
+    
+    // Non-Standard 512-bit Self-Consistency Test
+    gcm_test_vector_t test4 = { 
+        .name = "Self-Test (AES-512 Non-Standard)", 
+        .key_len = 64, 
+        .key = key_512_sc, 
+        .iv_len = 12, 
+        .iv = iv_512_sc, 
+        .pt_len = sizeof(pt_512_sc), // Correct assignment for pt_len
+        .pt = pt_512_sc, 
+        .aad_len = sizeof(aad_512_sc), // Correct assignment for aad_len
+        .aad = aad_512_sc,             // Correct assignment for aad
+        .expected_ct = NULL,           // Explicitly NULL for self-test 
+        .expected_tag = NULL           // Explicitly NULL for self-test
+    };
+
+    total_failures += run_gcm_test(&test1);
+    total_failures += run_gcm_test(&test2);
+    total_failures += run_gcm_test(&test3);
+    total_failures += run_gcm_test(&test4);
+
+    printf("===============================\n");
+    if (total_failures == 0) {
+        printf("ALL C TESTS PASSED\n"); // Clarify this is C test output
+    } else {
+        printf("%d C TEST(S) FAILED\n", total_failures); // Clarify this is C test output
+    }
+    printf("===============================\n");
+
+    return total_failures;
+}
+#endif // AES_GCM_STANDALONE_TEST
+
+

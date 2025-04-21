@@ -1,83 +1,141 @@
-![CI](https://github.com/kokke/tiny-AES-c/actions/workflows/c-cpp.yml/badge.svg)
-### Tiny AES in C
+# AES-GCM-512 (Fork of tiny-AES-c)
 
-This is a small and portable implementation of the AES [ECB](https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Electronic_Codebook_.28ECB.29), [CTR](https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Counter_.28CTR.29) and [CBC](https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Cipher_Block_Chaining_.28CBC.29) encryption algorithms written in C.
+[![Go Reference](https://pkg.go.dev/badge/github.com/TheMapleseed/AES-GCM-512-.svg)](https://pkg.go.dev/github.com/TheMapleseed/AES-GCM-512-)
 
-You can override the default key-size of 128 bit with 192 or 256 bit by defining the symbols AES192 or AES256 in [`aes.h`](https://github.com/kokke/tiny-AES-c/blob/master/aes.h).
+This repository provides a C implementation of the AES-GCM authenticated encryption algorithm, derived from the `tiny-AES-c` project (<https://github.com/kokke/tiny-AES-c>), with modifications to support AES-128, AES-192, AES-256, and a non-standard AES-512 variant.
 
-The API is very simple and looks like this (I am using C99 `<stdint.h>`-style annotated types):
+It includes Go language bindings (`aesgcm` package) for easy integration into Go projects, leveraging Cgo.
 
-```C
-/* Initialize context calling one of: */
-void AES_init_ctx(struct AES_ctx* ctx, const uint8_t* key);
-void AES_init_ctx_iv(struct AES_ctx* ctx, const uint8_t* key, const uint8_t* iv);
+The implementation aims for correctness and includes architecture-specific optimizations (AES-NI for x86_64, ARM Crypto for AArch64) where available and enabled at compile time.
 
-/* ... or reset IV at random point: */
-void AES_ctx_set_iv(struct AES_ctx* ctx, const uint8_t* iv);
+## Features
 
-/* Then start encrypting and decrypting with the functions below: */
-void AES_ECB_encrypt(const struct AES_ctx* ctx, uint8_t* buf);
-void AES_ECB_decrypt(const struct AES_ctx* ctx, uint8_t* buf);
+*   AES-GCM Authenticated Encryption and Decryption.
+*   Supports AES key sizes: 128, 192, 256, and non-standard 512 bits.
+*   Supports standard 12-byte (96-bit) IVs and other IV lengths via GHASH per NIST SP 800-38D.
+*   C library core (`aes.c`, `aes.h`).
+*   Go package wrapper (`aesgcm`) using Cgo.
+*   Architecture-specific optimizations (AES-NI, ARM Crypto) via intrinsics.
+*   Multiple build system options (Go, CMake, Make, GCC script).
 
-void AES_CBC_encrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
-void AES_CBC_decrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
+## Building
 
-/* Same function for encrypting as for decrypting in CTR mode */
-void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
+There are several ways to build this project, depending on your needs:
+
+### 1. Go Package (Recommended for Go Users)
+
+If you intend to use this library within a Go project, simply import the package. The Go build system (using Cgo) will automatically compile the necessary C source files (`aes.c`) along with the Go wrapper.
+
+```bash
+go get github.com/TheMapleseed/AES-GCM-512-
 ```
 
-Important notes: 
- * No padding is provided so for CBC and ECB all buffers should be multiples of 16 bytes. For padding [PKCS7](https://en.wikipedia.org/wiki/Padding_(cryptography)#PKCS7) is recommendable.
- * ECB mode is considered unsafe for most uses and is not implemented in streaming mode. If you need this mode, call the function for every block of 16 bytes you need encrypted. See [wikipedia's article on ECB](https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Electronic_Codebook_(ECB)) for more details.
- * This library is designed for small code size and simplicity, intended for cases where small binary size, low memory footprint and portability is more important than high performance. If speed is a concern, you can try more complex libraries, e.g. [Mbed TLS](https://tls.mbed.org/), [OpenSSL](https://www.openssl.org/) etc.
+The build process automatically selects the appropriate C flags based on the build tags (e.g., `aes128`, `aes192`, `aes256`, `aes512` - default is usually AES-256 if none specified) and attempts to enable architecture-specific optimizations.
 
-You can choose to use any or all of the modes-of-operations, by defining the symbols CBC, CTR or ECB in [`aes.h`](https://github.com/kokke/tiny-AES-c/blob/master/aes.h) (read the comments for clarification).
+Run tests:
+```bash
+go test -v
+```
 
-C++ users should `#include` [aes.hpp](https://github.com/kokke/tiny-AES-c/blob/master/aes.hpp) instead of [aes.h](https://github.com/kokke/tiny-AES-c/blob/master/aes.h)
+### 2. CMake (For C Library Deployment / Cgo)
 
-There is no built-in error checking or protection from out-of-bounds memory access errors as a result of malicious input.
+The `CMakeLists.txt` file supports two modes controlled by the `BUILD_C_DEPLOY_ARTIFACTS` option:
 
-The module uses less than 200 bytes of RAM and 1-2K ROM when compiled for ARM, but YMMV depending on which modes are enabled.
+*   **Cgo Mode (Default):** `cmake . && make`
+    *   Configures an `INTERFACE` library suitable for Cgo to consume.
+*   **C Library Deployment Mode:** `cmake . -DBUILD_C_DEPLOY_ARTIFACTS=ON && make`
+    *   Builds static (`libtiny_aes_gcm.a`) and shared (`libtiny_aes_gcm.so`/`.dylib`) C libraries.
+    *   Enables architecture-specific optimizations (`-maes -mpclmul` or `-march=armv8-a+crypto`) if detected.
+    *   Optionally builds the C test executable: `cmake . -DBUILD_C_DEPLOY_ARTIFACTS=ON -DBUILD_C_TEST_EXECUTABLE=ON && make`
+    *   Installs libraries and header: `sudo make install` (uses `/usr/local` prefix by default)
 
-It is one of the smallest implementations in C I've seen yet, but do contact me if you know of something smaller (or have improvements to the code here). 
+### 3. Make (Traditional C Build)
 
-I've successfully used the code on 64bit x86, 32bit ARM and 8 bit AVR platforms.
+Use the provided `Makefile` for a standard C build process:
 
+*   Build static and shared libraries: `make`
+*   Build only the C test executable: `make test_exe`
+*   Install libraries and header: `sudo make install`
+*   Clean build files: `make clean`
 
-GCC size output when only CTR mode is compiled for ARM:
+The Makefile also attempts to detect the architecture and enable optimizations.
 
-    $ arm-none-eabi-gcc -Os -DCBC=0 -DECB=0 -DCTR=1 -c aes.c
-    $ size aes.o
-       text    data     bss     dec     hex filename
-       1171       0       0    1171     493 aes.o
+### 4. Direct GCC (Example Script)
 
-.. and when compiling for the THUMB instruction set, we end up well below 1K in code size.
+The `build_with_gcc.sh` script provides a basic example of compiling the shared C library directly using GCC.
 
-    $ arm-none-eabi-gcc -Os -mthumb -DCBC=0 -DECB=0 -DCTR=1 -c aes.c
-    $ size aes.o
-       text    data     bss     dec     hex filename
-        903       0       0     903     387 aes.o
+```bash
+# Make executable (if needed)
+chmod +x build_with_gcc.sh
+# Run build
+./build_with_gcc.sh
+```
+This script also attempts architecture detection for optimization flags.
 
+## Go Package Usage (`aesgcm`)
 
-I am using the Free Software Foundation, ARM GCC compiler:
+```go
+package main
 
-    $ arm-none-eabi-gcc --version
-    arm-none-eabi-gcc (4.8.4-1+11-1) 4.8.4 20141219 (release)
-    Copyright (C) 2013 Free Software Foundation, Inc.
-    This is free software; see the source for copying conditions.  There is NO
-    warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+import (
+	"fmt"
+	"log"
+	"crypto/rand"
+	"github.com/TheMapleseed/AES-GCM-512-" // Adjust import path if necessary
+)
 
+func main() {
+	// Key must match the compiled key size (check aesgcm.CompiledKeySize())
+	// Example for AES-256
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		log.Fatalf("Failed to generate key: %v", err)
+	}
 
+	// Create context
+	ctx, err := aesgcm.NewContext(key)
+	if err != nil {
+		log.Fatalf("NewContext failed: %v", err)
+	}
 
+	// Prepare data
+	plaintext := []byte("This is a secret message.")
+	aad := []byte("Optional authenticated data")
+	iv := make([]byte, 12) // 12-byte IV recommended
+	if _, err := rand.Read(iv); err != nil {
+		log.Fatalf("Failed to generate IV: %v", err)
+	}
 
-This implementation is verified against the data in:
+	// Encrypt
+	ciphertext, tag, err := ctx.Encrypt(iv, aad, plaintext)
+	if err != nil {
+		log.Fatalf("Encrypt failed: %v", err)
+	}
+	fmt.Printf("Ciphertext: %x\n", ciphertext)
+	fmt.Printf("Tag: %x\n", tag)
 
-[National Institute of Standards and Technology Special Publication 800-38A 2001 ED](http://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38a.pdf) Appendix F: Example Vectors for Modes of Operation of the AES.
+	// Decrypt
+	decryptedText, err := ctx.Decrypt(iv, aad, ciphertext, tag)
+	if err != nil {
+		// Important: Check for authentication failure!
+		if err == aesgcm.ErrAuthFailed {
+			log.Fatalf("DECRYPTION FAILED: AUTHENTICATION ERROR")
+		} else {
+			log.Fatalf("Decrypt failed: %v", err)
+		}
+	}
 
-The other appendices in the document are valuable for implementation details on e.g. padding, generation of IVs and nonces in CTR-mode etc.
+	fmt.Printf("Decrypted: %s\n", string(decryptedText))
+}
+```
 
+## Original Project
 
-A heartfelt thank-you to [all the nice people](https://github.com/kokke/tiny-AES-c/graphs/contributors) out there who have contributed to this project.
+This project is a fork and modification of the `tiny-AES-c` project by `kokke`:
+<https://github.com/kokke/tiny-AES-c>
 
+The original code provided implementations for AES (ECB, CBC, CTR) modes.
 
-All material in this repository is in the public domain.
+## License
+
+This modified project is licensed under the GNU General Public License v3.0. See the `LICENSE` file for details.

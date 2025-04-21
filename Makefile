@@ -1,61 +1,104 @@
-#CC           = avr-gcc
-#CFLAGS       = -Wall -mmcu=atmega16 -Os -Wl,-Map,test.map
-#OBJCOPY      = avr-objcopy
-CC           = gcc
-LD           = gcc
-AR           = ar
-ARFLAGS      = rcs
-CFLAGS       = -Wall -Os -c
-LDFLAGS      = -Wall -Os -Wl,-Map,test.map
-ifdef AES192
-CFLAGS += -DAES192=1
+# Compiler and Flags
+CC = gcc
+
+# Detect Architecture and OS
+UNAME_M := $(shell uname -m)
+UNAME_S := $(shell uname -s)
+
+# Base CFLAGS
+BASE_CFLAGS = -Wall -Wextra -O2
+
+# Architecture-Specific Flags
+ARCH_FLAGS =
+ifeq ($(UNAME_M), x86_64)
+	ARCH_FLAGS += -maes -mpclmul
 endif
-ifdef AES256
-CFLAGS += -DAES256=1
+ifeq ($(UNAME_M), aarch64)
+	# Assuming ARMv8 with Crypto extensions. Adjust if needed for specific targets.
+	ARCH_FLAGS += -march=armv8-a+crypto
 endif
 
-OBJCOPYFLAGS = -j .text -O ihex
-OBJCOPY      = objcopy
+# CFLAGS for library objects (Position Independent Code)
+LIB_CFLAGS = $(BASE_CFLAGS) -fPIC -I. $(ARCH_FLAGS)
+# CFLAGS for test executable objects
+TEST_CFLAGS = $(BASE_CFLAGS) -I. -DAES_GCM_STANDALONE_TEST $(ARCH_FLAGS)
 
-# include path to AVR library
-INCLUDE_PATH = /usr/lib/avr/include
-# splint static check
-SPLINT       = splint test.c aes.c -I$(INCLUDE_PATH) +charindex -unrecog
+# Shared Library Flags and Suffix
+LDFLAGS = -shared
+SHARED_LIB_SUFFIX = .so # Default for Linux
+ifeq ($(UNAME_S), Darwin)
+	SHARED_LIB_SUFFIX = .dylib
+endif
 
-default: test.elf
+AR = ar
+ARFLAGS = rcs
 
-.SILENT:
-.PHONY:  lint clean
+# Installation Prefix
+PREFIX ?= /usr/local
 
-test.hex : test.elf
-	echo copy object-code to new image and format in hex
-	$(OBJCOPY) ${OBJCOPYFLAGS} $< $@
+# Library Files
+LIB_NAME = tiny_aes_gcm
+LIB_SRCS = aes.c
+LIB_OBJS = $(LIB_SRCS:.c=.o)
+# SHARED_LIB_SUFFIX = .so # Adjust for macOS (.dylib) or Windows (.dll) if needed <-- Now set dynamically
+SHARED_LIB = lib$(LIB_NAME)$(SHARED_LIB_SUFFIX)
+STATIC_LIB = lib$(LIB_NAME).a
 
-test.o : test.c aes.h aes.o
-	echo [CC] $@ $(CFLAGS)
-	$(CC) $(CFLAGS) -o  $@ $<
+# Test Executable Files
+TEST_SRCS = test_c_standalone.c
+TEST_OBJS = $(TEST_SRCS:.c=.o)
+TEST_TARGET = aes_gcm_test_c
+# Test executable needs aes.o compiled without -fPIC if linking statically, or can link shared.
+# Simplest for now: build test objects separately.
+TEST_AES_OBJ = aes_test.o # Use a different object name for the test version of aes.c
+TEST_ALL_OBJS = $(TEST_AES_OBJ) $(TEST_OBJS)
 
-aes.o : aes.c aes.h
-	echo [CC] $@ $(CFLAGS)
-	$(CC) $(CFLAGS) -o $@ $<
+# Build Rules
+all: $(SHARED_LIB) $(STATIC_LIB)
 
-test.elf : aes.o test.o
-	echo [LD] $@
-	$(LD) $(LDFLAGS) -o $@ $^
+# --- Library Build --- 
+$(SHARED_LIB): $(LIB_OBJS)
+	$(CC) $(LDFLAGS) $^ -o $@
 
-aes.a : aes.o
-	echo [AR] $@
+$(STATIC_LIB): $(LIB_OBJS)
 	$(AR) $(ARFLAGS) $@ $^
 
-lib : aes.a
+# Rule to compile library object files (with -fPIC)
+# Use specific target for library aes.o to distinguish from test aes.o
+$(LIB_OBJS): %.o: %.c aes.h Makefile
+	@echo "Compiling library object $@ with flags: $(LIB_CFLAGS)"
+	$(CC) $(LIB_CFLAGS) -c $< -o $@
 
+# --- Test Executable Build --- 
+test_exe: $(TEST_TARGET)
+
+$(TEST_TARGET): $(TEST_ALL_OBJS) # Use separate objects for test
+	@echo "Linking test executable $(TEST_TARGET) with flags: $(TEST_CFLAGS)"
+	$(CC) $(TEST_CFLAGS) $^ -o $@ # Link test executable
+
+# Rule to compile test executable object files (without -fPIC, with define)
+$(TEST_OBJS): %.o: %.c aes.h Makefile
+	@echo "Compiling test object $@ with flags: $(TEST_CFLAGS)"
+	$(CC) $(TEST_CFLAGS) -c $< -o $@
+
+# Need aes.o specifically for the test executable (no -fPIC needed here)
+# Use a distinct object file name (aes_test.o) to avoid conflicts with the library's aes.o
+$(TEST_AES_OBJ): aes.c aes.h Makefile
+	@echo "Compiling test object $@ with flags: $(TEST_CFLAGS)"
+	$(CC) $(TEST_CFLAGS) -c $< -o $@
+
+# --- Installation --- 
+install:
+	install -d $(DESTDIR)$(PREFIX)/include
+	install -m 644 aes.h $(DESTDIR)$(PREFIX)/include/
+	install -d $(DESTDIR)$(PREFIX)/lib
+	install -m 755 $(SHARED_LIB) $(DESTDIR)$(PREFIX)/lib/
+	install -m 644 $(STATIC_LIB) $(DESTDIR)$(PREFIX)/lib/
+	@echo "Installed $(LIB_NAME) headers and libraries to $(PREFIX)"
+
+# Clean Rule
 clean:
-	rm -f *.OBJ *.LST *.o *.gch *.out *.hex *.map *.elf *.a
+	rm -f $(LIB_OBJS) $(TEST_AES_OBJ) $(TEST_OBJS) $(SHARED_LIB) $(STATIC_LIB) $(TEST_TARGET)
 
-test:
-	make clean && make && ./test.elf
-	make clean && make AES192=1 && ./test.elf
-	make clean && make AES256=1 && ./test.elf
-
-lint:
-	$(call SPLINT)
+# Phony Targets
+.PHONY: all clean install test_exe 

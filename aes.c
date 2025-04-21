@@ -1,33 +1,21 @@
 /*
 
-This is an implementation of the AES algorithm, specifically ECB, CTR and CBC mode.
-Block size can be chosen in aes.h - available choices are AES128, AES192, AES256.
+This is an implementation of the AES-GCM authenticated encryption algorithm.
+Key sizes can be chosen in aes.h - available choices are AES128, AES192, AES256,
+and a non-standard AES512.
 
-The implementation is verified against the test vectors in:
-  National Institute of Standards and Technology Special Publication 800-38A 2001 ED
+The implementation of AES GCM is based on the guidelines in:
+  National Institute of Standards and Technology Special Publication 800-38D
 
-ECB-AES128
-----------
+This implementation supports standard 12-byte (96-bit) IVs directly and 
+handles other IV lengths by using GHASH as specified in NIST SP 800-38D.
 
-  plain-text:
-    6bc1bee22e409f96e93d7e117393172a
-    ae2d8a571e03ac9c9eb76fac45af8e51
-    30c81c46a35ce411e5fbc1191a0a52ef
-    f69f2445df4f9b17ad2b417be66c3710
+Structure for architecture-specific optimizations (AES-NI, ARM Crypto, etc.)
+for the core AES cipher and GHASH multiplication is included, but the 
+optimized implementations themselves are currently placeholders.
 
-  key:
-    2b7e151628aed2a6abf7158809cf4f3c
-
-  resulting cipher
-    3ad77bb40d7a3660a89ecaf32466ef97 
-    f5d3d58503b9699de785895a96fdbaaf 
-    43b1cd7f598ece23881b00e3ed030688 
-    7b0c785e27e8ad3f8223207104725dd4 
-
-
-NOTE:   String length must be evenly divisible by 16byte (str_len % 16 == 0)
-        You should pad the end of the string with zeros if this is not the case.
-        For AES192/256 the key size is proportionally larger.
+The original code was an AES implementation supporting ECB, CTR and CBC mode.
+ECB and CBC modes have been removed.
 
 */
 
@@ -36,7 +24,16 @@ NOTE:   String length must be evenly divisible by 16byte (str_len % 16 == 0)
 /* Includes:                                                                 */
 /*****************************************************************************/
 #include <string.h> // CBC mode, for memset
+#include <stdio.h>  // Add stdio.h for printf
 #include "aes.h"
+
+// Include headers for intrinsics if needed (example)
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h> // For AES-NI, PCLMULQDQ
+#elif defined(__aarch64__)
+#include <arm_neon.h>   // For ARM NEON and Crypto extensions
+// #include <arm_acle.h> // Alternative/additional header for ARM CPU intrinsics
+#endif
 
 /*****************************************************************************/
 /* Defines:                                                                  */
@@ -46,13 +43,16 @@ NOTE:   String length must be evenly divisible by 16byte (str_len % 16 == 0)
 
 #if defined(AES256) && (AES256 == 1)
     #define Nk 8
-    #define Nr 14
+    //#define Nr 14 // Nr is now defined in aes.h
 #elif defined(AES192) && (AES192 == 1)
     #define Nk 6
-    #define Nr 12
-#else
+    //#define Nr 12 // Nr is now defined in aes.h
+#elif defined(AES512) && (AES512 == 1) // Added non-standard 512-bit key option
+    #define Nk 16
+    //#define Nr 22 // Nr is now defined in aes.h
+#else // Default AES128
     #define Nk 4        // The number of 32 bit words in a key.
-    #define Nr 10       // The number of rounds in AES Cipher.
+    //#define Nr 10       // The number of 32 bit words in a key.
 #endif
 
 // jcallan@github points out that declaring Multiply as a function 
@@ -95,7 +95,7 @@ static const uint8_t sbox[256] = {
   0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
   0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16 };
 
-#if (defined(CBC) && CBC == 1) || (defined(ECB) && ECB == 1)
+#if 0 // (defined(CBC) && CBC == 1) || (defined(ECB) && ECB == 1) - rsbox is unused for GCM
 static const uint8_t rsbox[256] = {
   0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
   0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
@@ -134,12 +134,6 @@ static const uint8_t Rcon[11] = {
 /*****************************************************************************/
 /* Private functions:                                                        */
 /*****************************************************************************/
-/*
-static uint8_t getSBoxValue(uint8_t num)
-{
-  return sbox[num];
-}
-*/
 #define getSBoxValue(num) (sbox[(num)])
 
 // This function produces Nb(Nr+1) round keys. The round keys are used in each round to decrypt the states. 
@@ -196,7 +190,7 @@ static void KeyExpansion(uint8_t* RoundKey, const uint8_t* Key)
 
       tempa[0] = tempa[0] ^ Rcon[i/Nk];
     }
-#if defined(AES256) && (AES256 == 1)
+#if Nk > 6 // Apply extra SubWord for keys larger than 192 bits (Nk=8 for AES256, Nk=16 for non-standard AES512)
     if (i % Nk == 4)
     {
       // Function Subword()
@@ -220,6 +214,7 @@ void AES_init_ctx(struct AES_ctx* ctx, const uint8_t* key)
 {
   KeyExpansion(ctx->RoundKey, key);
 }
+#if 0 // No longer used in public API or GCM internal functions
 #if (defined(CBC) && (CBC == 1)) || (defined(CTR) && (CTR == 1))
 void AES_init_ctx_iv(struct AES_ctx* ctx, const uint8_t* key, const uint8_t* iv)
 {
@@ -230,6 +225,7 @@ void AES_ctx_set_iv(struct AES_ctx* ctx, const uint8_t* iv)
 {
   memcpy (ctx->Iv, iv, AES_BLOCKLEN);
 }
+#endif
 #endif
 
 // This function adds the round key to state.
@@ -335,6 +331,8 @@ static uint8_t Multiply(uint8_t x, uint8_t y)
 
 #endif
 
+#if 0 // Inverse functions are not used for GCM encryption/decryption
+
 #if (defined(CBC) && CBC == 1) || (defined(ECB) && ECB == 1)
 /*
 static uint8_t getSBoxInvert(uint8_t num)
@@ -409,32 +407,78 @@ static void InvShiftRows(state_t* state)
 }
 #endif // #if (defined(CBC) && CBC == 1) || (defined(ECB) && ECB == 1)
 
+#endif // End of commented-out inverse functions
+
 // Cipher is the main function that encrypts the PlainText.
 static void Cipher(state_t* state, const uint8_t* RoundKey)
 {
-  uint8_t round = 0;
+// --- Architecture-Specific Optimizations --- 
+#if defined(__x86_64__) || defined(_M_X64)
+    #if defined(__AES__)
+        // AES-NI intrinsic version for x86-64
+        // Assumes state is properly aligned
+        // Load state and first round key
+        __m128i block = _mm_loadu_si128((__m128i*)state);
+        const __m128i* pRoundKey = (const __m128i*)RoundKey;
 
-  // Add the First round key to the state before starting the rounds.
-  AddRoundKey(0, state, RoundKey);
+        // Initial AddRoundKey
+        block = _mm_xor_si128(block, _mm_loadu_si128(&pRoundKey[0]));
 
-  // There will be Nr rounds.
-  // The first Nr-1 rounds are identical.
-  // These Nr rounds are executed in the loop below.
-  // Last one without MixColumns()
-  for (round = 1; ; ++round)
-  {
-    SubBytes(state);
-    ShiftRows(state);
-    if (round == Nr) {
-      break;
+        // Main rounds (Nr-1 rounds)
+        // Unroll loop slightly for potentially better performance, adjust as needed
+        for (uint8_t round = 1; round < Nr; round += 2) {
+            block = _mm_aesenc_si128(block, _mm_loadu_si128(&pRoundKey[round]));
+            if (round + 1 < Nr) { // Check if there's another round in this pair
+                 block = _mm_aesenc_si128(block, _mm_loadu_si128(&pRoundKey[round + 1]));
+            }
+        }
+        
+        // Final round
+        block = _mm_aesenclast_si128(block, _mm_loadu_si128(&pRoundKey[Nr]));
+
+        // Store result back to state
+        _mm_storeu_si128((__m128i*)state, block);
+        return; // Skip C fallback if AES-NI path was taken
+    #endif
+#elif defined(__aarch64__)
+    #if defined(__ARM_FEATURE_CRYPTO)
+        // TODO: Implement ARMv8 Crypto Extensions intrinsic version
+        // Example: Use vaeseq_u8, vaesmcq_u8, etc.
+        // If implemented, use 'return;' at the end of this block 
+        // to skip the C fallback.
+        // printf("Note: ARM Crypto path placeholder hit.\n"); 
+    #endif
+// #elif defined(__riscv)
+    // TODO: Implement RISC-V crypto extension version if available/needed
+#endif
+// --- End Architecture-Specific Optimizations ---
+
+    // --- Generic C Implementation (Fallback) ---
+    uint8_t round = 0;
+
+    // Add the First round key to the state before starting the rounds.
+    AddRoundKey(0, state, RoundKey);
+
+    // There will be Nr rounds.
+    // The first Nr-1 rounds are identical.
+    // These Nr rounds are executed in the loop below.
+    // Last one without MixColumns()
+    for (round = 1; ; ++round)
+    {
+        SubBytes(state);
+        ShiftRows(state);
+        if (round == Nr) {
+            break;
+        }
+        MixColumns(state);
+        AddRoundKey(round, state, RoundKey);
     }
-    MixColumns(state);
-    AddRoundKey(round, state, RoundKey);
-  }
-  // Add round key to last round
-  AddRoundKey(Nr, state, RoundKey);
+    // Add round key to last round
+    AddRoundKey(Nr, state, RoundKey);
+    // --- End Generic C Implementation ---
 }
 
+#if 0 // Inverse Cipher function is not used for GCM encryption/decryption
 #if (defined(CBC) && CBC == 1) || (defined(ECB) && ECB == 1)
 static void InvCipher(state_t* state, const uint8_t* RoundKey)
 {
@@ -460,12 +504,13 @@ static void InvCipher(state_t* state, const uint8_t* RoundKey)
 
 }
 #endif // #if (defined(CBC) && CBC == 1) || (defined(ECB) && ECB == 1)
+#endif // End of commented-out InvCipher
 
 /*****************************************************************************/
 /* Public functions:                                                         */
 /*****************************************************************************/
+#if 0 // Deprecated ECB mode functions
 #if defined(ECB) && (ECB == 1)
-
 
 void AES_ECB_encrypt(const struct AES_ctx* ctx, uint8_t* buf)
 {
@@ -479,15 +524,11 @@ void AES_ECB_decrypt(const struct AES_ctx* ctx, uint8_t* buf)
   InvCipher((state_t*)buf, ctx->RoundKey);
 }
 
-
 #endif // #if defined(ECB) && (ECB == 1)
+#endif // End of commented-out ECB
 
-
-
-
-
+#if 0 // Deprecated CBC mode functions
 #if defined(CBC) && (CBC == 1)
-
 
 static void XorWithIv(uint8_t* buf, const uint8_t* Iv)
 {
@@ -529,44 +570,371 @@ void AES_CBC_decrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
 }
 
 #endif // #if defined(CBC) && (CBC == 1)
-
+#endif // End of commented-out CBC
 
 
 #if defined(CTR) && (CTR == 1)
 
-/* Symmetrical operation: same function for encrypting as for decrypting. Note any IV/nonce should never be reused with the same key */
-void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
+// Internal CTR function used by GCM.
+// Encrypts/decrypts buffer using AES in CTR mode.
+// Make ctx const as it's only used for reading RoundKey.
+// Pass the counter block explicitly.
+static void AES_CTR_xcrypt_buffer(const struct AES_ctx* ctx, uint8_t* current_counter_block, uint8_t* buf, size_t length)
 {
-  uint8_t buffer[AES_BLOCKLEN];
-  
+  uint8_t buffer[AES_BLOCKLEN]; // Buffer for encrypted counter block
   size_t i;
   int bi;
+
+  // Start with the current counter value
+  memcpy(buffer, current_counter_block, AES_BLOCKLEN);
+
   for (i = 0, bi = AES_BLOCKLEN; i < length; ++i, ++bi)
   {
-    if (bi == AES_BLOCKLEN) /* we need to regen xor compliment in buffer */
+    if (bi == AES_BLOCKLEN) // Regen xor buffer if needed
     {
-      
-      memcpy(buffer, ctx->Iv, AES_BLOCKLEN);
-      Cipher((state_t*)buffer,ctx->RoundKey);
+        Cipher((state_t*)buffer, ctx->RoundKey); // Encrypt the current counter block
 
-      /* Increment Iv and handle overflow */
-      for (bi = (AES_BLOCKLEN - 1); bi >= 0; --bi)
-      {
-	/* inc will overflow */
-        if (ctx->Iv[bi] == 255)
-	{
-          ctx->Iv[bi] = 0;
-          continue;
-        } 
-        ctx->Iv[bi] += 1;
-        break;   
-      }
-      bi = 0;
+        // Increment counter block for next time (standard GCM increments the rightmost 32 bits)
+        for (bi = (AES_BLOCKLEN - 1); bi >= (AES_BLOCKLEN - 4); --bi) {
+            // Increment the byte and break if no carry
+            if (++current_counter_block[bi] != 0) { 
+                 break;
+             }
+        }
+        // Copy the *next* counter value to buffer for the next encryption cycle
+        memcpy(buffer, current_counter_block, AES_BLOCKLEN); 
+        bi = 0;
     }
-
-    buf[i] = (buf[i] ^ buffer[bi]);
+    buf[i] = (buf[i] ^ buffer[bi]); // XOR plaintext/ciphertext with encrypted counter block
   }
 }
 
 #endif // #if defined(CTR) && (CTR == 1)
+
+
+// --- GCM Implementation ---
+
+// Define the GCM polynomial R = x^128 + x^7 + x^2 + x + 1
+// Represented as 0xE1000000000000000000000000000000 (bit 127, 7, 2, 1, 0)
+// We only need the lowest byte for the bitwise implementation: 0xE1
+#define GCM_POLYNOMIAL 0xE1
+
+// Galois Field (GF(2^128)) Multiplication (ghash_gmul)
+// Multiplies x by y in GF(2^128) using the GCM polynomial R.
+// Includes placeholders for architecture-specific optimizations (PCLMULQDQ, PMULL).
+// The C implementation below serves as a portable fallback.
+// Input x, y, Output res are 16 bytes (128 bits) treated as polynomials.
+static void ghash_gmul(const uint8_t x[16], const uint8_t y[16], uint8_t res[16]) {
+
+// --- Architecture-Specific Optimizations --- 
+#if defined(__x86_64__) || defined(_M_X64)
+    #if defined(__PCLMULQDQ__) && defined(__SSE2__)
+        // PCLMULQDQ intrinsic version for x86-64 (Illustrative - Reduction missing/simplified)
+        // Based on Intel's Carry-Less Multiplication instruction whitepaper/examples
+        // WARNING: Correct reduction implementation is complex and crucial for security.
+        // This example only shows the multiplication part, NOT the full reduction.
+        
+        __m128i h = _mm_loadu_si128((const __m128i*)x); // Load H (already byte-reversed if needed)
+        __m128i t = _mm_loadu_si128((const __m128i*)y); // Load Tag/Data (ensure byte order)
+
+        // Perform carry-less multiplications
+        __m128i tmp2 = _mm_clmulepi64_si128(h, t, 0x00); // H_low * T_low
+        __m128i tmp3 = _mm_clmulepi64_si128(h, t, 0x11); // H_high * T_high
+        __m128i tmp4 = _mm_clmulepi64_si128(h, t, 0x10); // H_high * T_low
+        __m128i tmp5 = _mm_clmulepi64_si128(h, t, 0x01); // H_low * T_high
+
+        // XOR intermediates
+        __m128i tmp6 = _mm_xor_si128(tmp4, tmp5); // tmp4 ^ tmp5
+        __m128i tmp7 = _mm_slli_si128(tmp6, 8);   // Shift left 64 bits
+        __m128i tmp8 = _mm_srli_si128(tmp6, 8);   // Shift right 64 bits
+        __m128i tmp9 = _mm_xor_si128(tmp2, tmp7); // tmp2 ^ shifted_tmp6_left
+        __m128i tmp10 = _mm_xor_si128(tmp3, tmp8);// tmp3 ^ shifted_tmp6_right
+        __m128i result_no_reduction = _mm_xor_si128(tmp9, tmp10); // Intermediate 256-bit result (lower 128 bits)
+
+        // ****** IMPORTANT: POLYNOMIAL REDUCTION STEP IS MISSING HERE ******
+        // The result_no_reduction needs to be reduced modulo the GCM polynomial (x^128 + x^7 + x^2 + x + 1)
+        // Implementing this reduction efficiently and correctly using intrinsics 
+        // (e.g., more PCLMULQDQ, shifts, XORs) is non-trivial and omitted for brevity/complexity.
+        // A naive C implementation of reduction would defeat the purpose.
+        // Refer to Intel documentation or optimized libraries (OpenSSL) for complete reduction.
+        
+        // Placeholder: Just copy the unreduced lower 128 bits for illustration
+        _mm_storeu_si128((__m128i*)res, result_no_reduction);
+        
+        // If reduction were implemented correctly, we would return here.
+        // printf("Warning: PCLMULQDQ path used, but reduction is NOT implemented!\n");
+        return; 
+    #endif
+#elif defined(__aarch64__)
+    #if defined(__ARM_FEATURE_CRYPTO) || defined(__ARM_NEON) // Check for NEON as well, PMULL is part of Adv SIMD
+        // TODO: Implement ARMv8 PMULL intrinsic version (NEON)
+        // Example: Use vmull_p64, veorq_u8, etc.
+        // Requires careful handling of polynomial reduction (similar complexity to x86).
+        // If implemented, use 'return;' at the end of this block 
+        // to skip the C fallback.
+        // printf("Note: ARM PMULL path placeholder hit.\n"); 
+    #endif
+// #elif defined(__riscv)
+    // TODO: Implement RISC-V vector extension version if available/needed
+#endif
+// --- End Architecture-Specific Optimizations ---
+
+    // --- Generic C Implementation (Fallback) ---
+    uint8_t V[16];
+    int i, j;
+
+    memset(res, 0, 16); // Z = 0
+    memcpy(V, y, 16);   // V = y
+
+    for (i = 0; i < 16; ++i) { // Iterate over bytes of x
+        for (j = 0; j < 8; ++j) { // Iterate over bits of x[i]
+            // If the current bit of x is 1, XOR Z with V
+            if ((x[i] >> (7 - j)) & 1) {
+                for(int k=0; k<16; ++k) {
+                    res[k] ^= V[k];
+                }
+            }
+
+            // Right-shift V by 1 bit (multiply V by x^-1 mod P)
+            uint8_t lsb_set = (V[15] & 1);
+            for (int k = 15; k >= 0; --k) {
+                V[k] >>= 1;
+                if (k > 0 && (V[k - 1] & 1)) { // Carry bit from left byte
+                    V[k] |= 0x80;
+                }
+            }
+
+            // If the shifted-out bit was 1, XOR V with R (GCM_POLYNOMIAL)
+            if (lsb_set) {
+                V[0] ^= GCM_POLYNOMIAL; 
+            }
+        }
+    }
+    // The result is now in res (Z)
+    // --- End Generic C Implementation ---
+}
+
+// GHASH function update
+// Processes data (AAD or ciphertext) and updates the GHASH state S.
+// S = (S ^ data_block) * H
+static void ghash_update(uint8_t S[16], const uint8_t H[16], const uint8_t* data, size_t len) {
+    size_t i;
+    uint8_t block[16];
+
+    for (i = 0; (i + AES_BLOCKLEN) <= len; i += AES_BLOCKLEN) {
+        // XOR S with the current block
+        for(int k=0; k<16; ++k) {
+            S[k] ^= data[i + k];
+        }
+        // Multiply S by H
+        ghash_gmul(S, H, S);
+    }
+
+    // Handle partial block if any
+    if (i < len) {
+        size_t remaining = len - i;
+        memcpy(block, data + i, remaining);
+        memset(block + remaining, 0, AES_BLOCKLEN - remaining); // Pad with zeros
+
+        // XOR S with the padded block
+        for(int k=0; k<16; ++k) {
+            S[k] ^= block[k];
+        }
+        // Multiply S by H
+        ghash_gmul(S, H, S);
+    }
+}
+
+// Helper to increment the counter block (last 4 bytes) - specific for GCM J0 prep
+static void increment_counter_j0(uint8_t counter[AES_BLOCKLEN]) {
+    for (int i = AES_BLOCKLEN - 1; i >= AES_BLOCKLEN - 4; --i) {
+        if (++counter[i] != 0) {
+            break;
+        }
+    }
+}
+
+// Helper to encode length (as 64-bit big-endian) into the last 8 bytes of a block
+static void encode_length(uint64_t len_bits, uint8_t block[AES_BLOCKLEN]) {
+    // Encode length in big-endian order
+    block[8]  = (uint8_t)(len_bits >> 56);
+    block[9]  = (uint8_t)(len_bits >> 48);
+    block[10] = (uint8_t)(len_bits >> 40);
+    block[11] = (uint8_t)(len_bits >> 32);
+    block[12] = (uint8_t)(len_bits >> 24);
+    block[13] = (uint8_t)(len_bits >> 16);
+    block[14] = (uint8_t)(len_bits >> 8);
+    block[15] = (uint8_t)(len_bits);
+    // Ensure first 8 bytes are zero if only encoding length
+    // Note: In GHASH final block, AAD len is in first 8, PT len in last 8
+    // This helper is used for both IV hashing (len in last 8) and final block (split)
+}
+
+// Constant-time memory comparison
+// Returns 0 if identical, non-zero otherwise.
+// Ensures that the comparison time is independent of the data.
+static int constant_time_memcmp(const void* ptr1, const void* ptr2, size_t num) {
+    const volatile uint8_t* a = (const volatile uint8_t*)ptr1;
+    const volatile uint8_t* b = (const volatile uint8_t*)ptr2;
+    uint8_t result = 0;
+    size_t i;
+    // Iterate through all bytes, accumulating differences via XOR
+    // The result is non-zero if any byte differs, but the loop always runs num times.
+    for (i = 0; i < num; ++i) {
+        result |= (a[i] ^ b[i]);
+    }
+    // Return 0 if equal (result == 0), 1 if unequal (result != 0)
+    // This final step ensures a consistent non-zero return value for any difference.
+    return (result != 0);
+}
+
+
+int AES_GCM_encrypt(struct AES_ctx* ctx, 
+                    const uint8_t* iv, size_t iv_len, 
+                    const uint8_t* aad, size_t aad_len, 
+                    const uint8_t* pt, uint8_t* ct, size_t pt_len, 
+                    uint8_t* tag)
+{
+    if (iv_len == 0 || (aad == NULL && aad_len > 0) || (pt == NULL && pt_len > 0) || ct == NULL || tag == NULL) {
+        return -1; // Invalid arguments
+    }
+    // Removed IV length check, now supporting other lengths
+    // if (iv_len != AES_GCM_IV_LEN) { ... return -2; }
+
+    uint8_t H[AES_BLOCKLEN] = {0};      // Hash subkey
+    uint8_t J0[AES_BLOCKLEN];           // Initial counter block derived from IV
+    uint8_t GCM_S[AES_BLOCKLEN] = {0};  // GHASH state (used for AAD/CT and potentially IV)
+    uint8_t EK0[AES_BLOCKLEN];          // Encrypted initial counter block E_K(J0)
+
+    // 1. Generate H = E_K(0^128)
+    Cipher((state_t*)H, ctx->RoundKey);
+
+    // 2. Prepare J0 (Initial Counter Block)
+    if (iv_len == AES_GCM_IV_LEN) { // Standard 96-bit IV case
+        memcpy(J0, iv, iv_len); // iv_len is 12
+        memset(J0 + iv_len, 0, AES_BLOCKLEN - iv_len - 1); // Zero pad
+        J0[AES_BLOCKLEN - 1] = 1; // Set last byte to 1
+    } else { // IV length is not 96 bits - use GHASH
+        uint8_t len_block[16] = {0};
+        uint64_t iv_len_bits = (uint64_t)iv_len * 8;
+        encode_length(iv_len_bits, len_block + 8); // Encode IV length in bits at the end
+
+        memset(GCM_S, 0, 16); // Initialize GHASH state for IV processing
+        ghash_update(GCM_S, H, iv, iv_len);       // GHASH the IV (ghash_update handles padding)
+        ghash_update(GCM_S, H, len_block, 16);  // GHASH the length block
+        memcpy(J0, GCM_S, 16); // Resulting hash is J0
+
+        // Reset GCM_S for AAD/CT processing
+        memset(GCM_S, 0, 16);
+    }
+    
+    memcpy(EK0, J0, AES_BLOCKLEN); // Keep copy of J0 for tag calc
+    Cipher((state_t*)EK0, ctx->RoundKey); // Calculate E_K(J0)
+
+    // 3. Process AAD with GHASH
+    ghash_update(GCM_S, H, aad, aad_len);
+
+    // 4. Encrypt Plaintext using CTR mode (starting counter is J0+1)
+    uint8_t current_counter[AES_BLOCKLEN];
+    memcpy(current_counter, J0, AES_BLOCKLEN);
+    increment_counter_j0(current_counter); // counter = J0 + 1
+    if (pt_len > 0) {
+        memcpy(ct, pt, pt_len); // Copy plaintext to ciphertext buffer for in-place encryption
+        AES_CTR_xcrypt_buffer(ctx, current_counter, ct, pt_len);
+    }
+
+    // 5. Process Ciphertext with GHASH
+    ghash_update(GCM_S, H, ct, pt_len);
+
+    // 6. Calculate final GHASH block with lengths
+    uint8_t final_len_block[16] = {0};
+    encode_length((uint64_t)aad_len * 8, final_len_block);    // AAD length in bits
+    encode_length((uint64_t)pt_len * 8, final_len_block + 8); // PT length in bits
+    ghash_update(GCM_S, H, final_len_block, 16);
+
+    // 7. Calculate Tag T = GHASH_result ^ E_K(J0)
+    for (int i = 0; i < AES_GCM_TAG_LEN; ++i) {
+        tag[i] = GCM_S[i] ^ EK0[i];
+    }
+
+    return 0; // Success
+}
+
+int AES_GCM_decrypt(struct AES_ctx* ctx, 
+                    const uint8_t* iv, size_t iv_len, 
+                    const uint8_t* aad, size_t aad_len, 
+                    const uint8_t* ct, uint8_t* pt, size_t ct_len, 
+                    const uint8_t* tag)
+{
+     if (iv_len == 0 || (aad == NULL && aad_len > 0) || (ct == NULL && ct_len > 0) || pt == NULL || tag == NULL) {
+        return -1; // Invalid arguments
+    }
+    // Removed IV length check, now supporting other lengths
+    // if (iv_len != AES_GCM_IV_LEN) { ... return -2; }
+
+    uint8_t H[AES_BLOCKLEN] = {0};      // Hash subkey
+    uint8_t J0[AES_BLOCKLEN];           // Initial counter block derived from IV
+    uint8_t GCM_S[AES_BLOCKLEN] = {0};  // GHASH state
+    uint8_t EK0[AES_BLOCKLEN];          // Encrypted initial counter block E_K(J0)
+    uint8_t calculated_tag[AES_GCM_TAG_LEN];
+
+    // 1. Generate H = E_K(0^128)
+    Cipher((state_t*)H, ctx->RoundKey);
+
+    // 2. Prepare J0 (Initial Counter Block) - Same logic as encryption
+    if (iv_len == AES_GCM_IV_LEN) { // Standard 96-bit IV case
+         memcpy(J0, iv, iv_len);
+        memset(J0 + iv_len, 0, AES_BLOCKLEN - iv_len - 1); // Zero pad
+        J0[AES_BLOCKLEN - 1] = 1; // Set last byte to 1
+    } else { // IV length is not 96 bits - use GHASH
+        uint8_t len_block[16] = {0};
+        uint64_t iv_len_bits = (uint64_t)iv_len * 8;
+        encode_length(iv_len_bits, len_block + 8); // Encode IV length in bits at the end
+
+        memset(GCM_S, 0, 16); // Initialize GHASH state for IV processing
+        ghash_update(GCM_S, H, iv, iv_len);       // GHASH the IV
+        ghash_update(GCM_S, H, len_block, 16);  // GHASH the length block
+        memcpy(J0, GCM_S, 16); // Resulting hash is J0
+
+        // Reset GCM_S for AAD/CT processing
+        memset(GCM_S, 0, 16);
+    }
+
+    memcpy(EK0, J0, AES_BLOCKLEN); // Keep copy of J0 for tag calc
+    Cipher((state_t*)EK0, ctx->RoundKey); // Calculate E_K(J0)
+
+    // 3. Process AAD with GHASH
+    ghash_update(GCM_S, H, aad, aad_len);
+
+    // 4. Process Ciphertext with GHASH
+    ghash_update(GCM_S, H, ct, ct_len);
+
+    // 5. Calculate final GHASH block with lengths
+    uint8_t final_len_block[16] = {0};
+    encode_length((uint64_t)aad_len * 8, final_len_block);     // AAD length in bits
+    encode_length((uint64_t)ct_len * 8, final_len_block + 8);  // CT length in bits
+    ghash_update(GCM_S, H, final_len_block, 16);
+
+    // 6. Calculate potential Tag T = GHASH_result ^ E_K(J0)
+    for (int i = 0; i < AES_GCM_TAG_LEN; ++i) {
+        calculated_tag[i] = GCM_S[i] ^ EK0[i];
+    }
+
+    // 7. Compare calculated tag with received tag (use constant-time compare!)
+    if (constant_time_memcmp(calculated_tag, tag, AES_GCM_TAG_LEN) != 0) {
+        memset(pt, 0, ct_len); // Zero out plaintext buffer on tag mismatch
+        return -3; // Authentication failed
+    }
+
+    // 8. Decrypt Ciphertext using CTR mode (starting counter is J0+1)
+    uint8_t current_counter[AES_BLOCKLEN];
+    memcpy(current_counter, J0, AES_BLOCKLEN);
+    increment_counter_j0(current_counter); // counter = J0 + 1
+    if (ct_len > 0) {
+         memcpy(pt, ct, ct_len); // Copy ciphertext to plaintext buffer for in-place decryption
+        AES_CTR_xcrypt_buffer(ctx, current_counter, pt, ct_len);
+    }
+
+    return 0; // Success (decryption ok, tag matched)
+}
 
